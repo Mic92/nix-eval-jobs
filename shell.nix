@@ -19,12 +19,17 @@ let
   nix-eval-jobs = pkgs.callPackage ./default.nix {
     inherit srcDir nix;
   };
+  stdenv' = if stdenv.cc.isClang then pkgs.clang12Stdenv else stdenv;
 in
-pkgs.mkShell {
+stdenv'.mkDerivation {
+  name = "env";
   inherit (nix-eval-jobs) buildInputs;
   nativeBuildInputs = nix-eval-jobs.nativeBuildInputs ++ [
     pkgs.treefmt
-    pkgs.llvmPackages.clang # clang-format
+    (pkgs.runCommand "clang-format" {} ''
+      mkdir -p $out/bin
+      ln -s ${pkgs.llvmPackages.clang}/bin/clang-format $out/bin/clang-format
+    '')
     pkgs.nixpkgs-fmt
     pkgs.nodePackages.prettier
 

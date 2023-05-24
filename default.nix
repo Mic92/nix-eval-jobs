@@ -1,4 +1,5 @@
 { stdenv
+, clang12Stdenv
 , lib
 , nix
 , meson
@@ -14,8 +15,9 @@ let
   filterMesonBuild = dir: builtins.filterSource
     (path: type: type != "directory" || baseNameOf path != "build")
     dir;
+  stdenv' = if stdenv.cc.isClang then clang12Stdenv else stdenv;
 in
-stdenv.mkDerivation rec {
+stdenv'.mkDerivation {
   pname = "nix-eval-jobs";
   version = "2.14.0";
   src = if srcDir == null then filterMesonBuild ./. else srcDir;
