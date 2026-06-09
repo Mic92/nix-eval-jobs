@@ -58,6 +58,7 @@
 #include "output-stream-lock.hh"
 #include "constituents.hh"
 #include "store.hh"
+#include "cache-status-resolver.hh"
 
 namespace {
 MyArgs myArgs; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
@@ -356,9 +357,30 @@ auto getNextJob(nix::Sync<State> &state_, std::condition_variable &wakeup,
     }
 }
 
+/* Record a finished job/error in the shared state and print it,
+   unless it is an aggregate that still awaits its constituents (then
+   handleConstituents prints it later). */
+void emitResponse(nix::Sync<State> &state_, const Response &response,
+                  nlohmann::json jsonResponse, std::string_view dumped) {
+    {
+        auto state(state_.lock());
+        state->jobs.insert_or_assign(response.attr, std::move(jsonResponse));
+    }
+
+    bool hasPendingConstituents = false;
+    if (const auto *job = std::get_if<Response::Job>(&response.payload)) {
+        hasPendingConstituents =
+            !job->drv.constituents.namedConstituents.empty();
+    }
+    if (!hasPendingConstituents) {
+        getCoutLock().lock() << dumped << "\n";
+    }
+}
+
 auto processWorkerResponse(LineReader *fromReader,
                            const nlohmann::json &attrPath, Proc *proc,
-                           nix::Sync<State> &state_)
+                           nix::Sync<State> &state_,
+                           CacheStatusResolver *cacheStatusResolver)
     -> std::vector<nlohmann::json> {
     // Read response from worker
     auto respString = fromReader->readLine();
@@ -386,22 +408,13 @@ auto processWorkerResponse(LineReader *fromReader,
             newAttr.emplace_back(attr);
             newAttrs.push_back(newAttr);
         }
+    } else if ((cacheStatusResolver != nullptr) &&
+               std::holds_alternative<Response::Job>(response.payload)) {
+        // The resolver fills in cacheStatus, then records/prints the job
+        // via its sink.
+        cacheStatusResolver->push(std::move(response));
     } else {
-        {
-            auto state(state_.lock());
-            state->jobs.insert_or_assign(response.attr,
-                                         std::move(jsonResponse));
-        }
-
-        bool hasPendingConstituents = false;
-        if (auto *job = std::get_if<Response::Job>(&response.payload)) {
-            hasPendingConstituents =
-                !job->drv.constituents.namedConstituents.empty();
-        }
-
-        if (!hasPendingConstituents) {
-            getCoutLock().lock() << respString << "\n";
-        }
+        emitResponse(state_, response, std::move(jsonResponse), respString);
 
         if (auto *error = std::get_if<Response::Error>(&response.payload);
             (error != nullptr) && error->fatal) {
@@ -424,7 +437,23 @@ void updateJobQueue(nix::Sync<State> &state_, std::condition_variable &wakeup,
 }
 } // namespace
 
-void collector(nix::Sync<State> &state_, std::condition_variable &wakeup) {
+/* Rationale for the separate resolver: see CacheStatusResolver. */
+auto makeCacheStatusResolver(const MyArgs &args, nix::Sync<State> &state_)
+    -> std::optional<CacheStatusResolver> {
+    if (!args.checkCacheStatus) {
+        return std::nullopt;
+    }
+    return std::optional<CacheStatusResolver>(
+        std::in_place, nix_eval_jobs::openStore(args.evalStoreUrl),
+        [&state_](const Response &response) -> void {
+            nlohmann::json jsonResponse = response;
+            auto dumped = jsonResponse.dump();
+            emitResponse(state_, response, std::move(jsonResponse), dumped);
+        });
+}
+
+void collector(nix::Sync<State> &state_, std::condition_variable &wakeup,
+               CacheStatusResolver *cacheStatusResolver) {
     try {
         std::optional<std::unique_ptr<Proc>> proc_;
         std::optional<std::unique_ptr<LineReader>> fromReader_;
@@ -461,9 +490,9 @@ void collector(nix::Sync<State> &state_, std::condition_variable &wakeup) {
                 handleBrokenWorkerPipe(*proc_.value(), msg);
             }
 
-            auto newAttrs =
-                processWorkerResponse(fromReader_.value().get(), attrPath,
-                                      proc_.value().get(), state_);
+            auto newAttrs = processWorkerResponse(fromReader_.value().get(),
+                                                  attrPath, proc_.value().get(),
+                                                  state_, cacheStatusResolver);
 
             updateJobQueue(state_, wakeup, attrPath, newAttrs);
         }
@@ -569,24 +598,43 @@ auto main(int argc, char **argv) -> int {
             nix_eval_jobs::openStore(myArgs.evalStoreUrl);
         }
 
+        auto cacheStatusResolver = makeCacheStatusResolver(myArgs, state_);
+        auto *cacheStatusResolverPtr =
+            cacheStatusResolver ? &*cacheStatusResolver : nullptr;
+
         /* Start a collector thread per worker process. */
         std::vector<Thread> threads;
         std::condition_variable wakeup;
         threads.reserve(myArgs.nrWorkers);
         for (size_t i = 0; i < myArgs.nrWorkers; i++) {
             threads.emplace_back(
-                [&state_, &wakeup] -> void { collector(state_, wakeup); });
+                [&state_, &wakeup, cacheStatusResolverPtr] -> void {
+                    collector(state_, wakeup, cacheStatusResolverPtr);
+                });
         }
 
         for (auto &thread : threads) {
             thread.join();
         }
 
-        auto state(state_.lock());
-
-        if (state->exc) {
-            std::rethrow_exception(state->exc);
+        /* A collector error must surface immediately: rethrowing it
+           here lets the CacheStatusResolver destructor discard the
+           backlog instead of finish() draining it first (which would
+           also mask the eval error with any resolver error). */
+        {
+            auto state(state_.lock());
+            if (state->exc) {
+                std::rethrow_exception(state->exc);
+            }
         }
+
+        /* All eval results are in; wait for outstanding cache-status
+           checks before constituents are aggregated. */
+        if (cacheStatusResolver) {
+            cacheStatusResolver->finish();
+        }
+
+        auto state(state_.lock());
 
         if (myArgs.constituents) {
             handleConstituents(state->jobs, myArgs);
