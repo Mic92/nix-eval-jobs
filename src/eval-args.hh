@@ -33,6 +33,8 @@ class MyArgs : virtual public nix::MixEvalArgs,
     bool constituents = false;
     bool noInstantiate = false;
     size_t nrWorkers = 1;
+    // 0 means "use the default" (see main).
+    size_t nrCacheCheckWorkers = 0;
     size_t maxMemorySize = DEFAULT_MAX_MEMORY_SIZE;
 
     // usually in MixFlakeOptions

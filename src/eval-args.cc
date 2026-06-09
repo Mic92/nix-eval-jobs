@@ -165,6 +165,22 @@ MyArgs::MyArgs() : MixCommonArgs("nix-eval-jobs") {
     });
 
     addFlag({
+        .longName = "cache-check-workers",
+        .aliases = {},
+        .shortName = 0,
+        .description =
+            "number of threads performing --check-cache-status substituter "
+            "lookups (default: 64; the work is network bound)",
+        .category = "",
+        .labels = {"workers"},
+        .handler = {[this](const std::string &str) -> void {
+            nrCacheCheckWorkers = std::stoi(str);
+        }},
+        .completer = nullptr,
+        .experimentalFeature = std::nullopt,
+    });
+
+    addFlag({
         .longName = "show-input-drvs",
         .aliases = {},
         .shortName = 0,

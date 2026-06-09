@@ -4,6 +4,8 @@
 #include <nix/expr/get-drvs.hh>
 #include <nix/expr/eval.hh>
 #include <nix/store/path.hh>
+#include <nix/store/derivations.hh>
+#include <nix/store/store-api.hh>
 #include <nix/util/json-impls.hh>
 #include <nix/util/types.hh>
 #include <nlohmann/json_fwd.hpp>
@@ -83,3 +85,14 @@ struct Drv {
 
 JSON_IMPL(Constituents)
 JSON_IMPL(Drv)
+
+/* Compute the cache status of a derivation via Store::queryMissing
+   (substituter lookups) and fill in the needed-builds/substitutes
+   lists. */
+auto queryCacheStatus(
+    nix::Store &store,
+    std::map<std::string, std::optional<nix::StorePath>> &outputs,
+    nix::StorePaths &neededBuilds,
+    std::vector<nix::StorePath> &neededSubstitutes,
+    std::vector<nix::StorePath> &unknownPaths, const nix::Derivation &drv)
+    -> Drv::CacheStatus;

@@ -145,6 +145,8 @@ auto checkOutputsAvailable(
     return infos.empty() ? Drv::CacheStatus::Local : Drv::CacheStatus::Cached;
 }
 
+} // namespace
+
 auto queryCacheStatus(
     nix::Store &store,
     std::map<std::string, std::optional<nix::StorePath>> &outputs,
@@ -222,8 +224,6 @@ auto queryCacheStatus(
     return Drv::CacheStatus::NotBuilt;
 };
 
-} // namespace
-
 /* The fields of a derivation that are printed in json form */
 auto Drv::fromPackageInfo(std::string &attrPath, nix::EvalState &state,
                           nix::PackageInfo &packageInfo, MyArgs &args,
@@ -253,13 +253,6 @@ auto Drv::fromPackageInfo(std::string &attrPath, nix::EvalState &state,
 
         // Use the more precise system from the derivation
         result.system = drv.platform;
-
-        if (args.checkCacheStatus) {
-            // TODO: is this a bottleneck, where we should batch these queries?
-            result.cacheStatus = queryCacheStatus(
-                *store, result.outputs, result.neededBuilds,
-                result.neededSubstitutes, result.unknownPaths, drv);
-        }
 
         if (args.showInputDrvs) {
             result.inputDrvs = queryInputDrvs(drv);
